@@ -4,7 +4,8 @@
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -22,6 +23,24 @@ _CATEGORY_DISPLAY_NAMES: Dict[str, str] = {
     "patterns": "Suspicious Prompt Patterns",
     "outputs": "Abnormal Outputs",
 }
+
+
+class PromptIntelSeverity(Enum):
+    """Severity levels for PromptIntel prompts."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class PromptIntelCategory(Enum):
+    """Threat categories in the PromptIntel dataset."""
+
+    MANIPULATION = "manipulation"
+    ABUSE = "abuse"
+    PATTERNS = "patterns"
+    OUTPUTS = "outputs"
 
 
 class _PromptIntelDataset(_RemoteDatasetLoader):
@@ -49,15 +68,12 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
     PROMPT_WEB_URL = "https://promptintel.novahunting.ai/prompt"
     MAX_PAGE_LIMIT = 100
 
-    VALID_SEVERITIES = ["low", "medium", "high", "critical"]
-    VALID_CATEGORIES = ["manipulation", "abuse", "patterns", "outputs"]
-
     def __init__(
         self,
         *,
         api_key: Optional[str] = None,
-        severity: Optional[Literal["low", "medium", "high", "critical"]] = None,
-        categories: Optional[List[Literal["manipulation", "abuse", "patterns", "outputs"]]] = None,
+        severity: Optional[PromptIntelSeverity] = None,
+        categories: Optional[List[PromptIntelCategory]] = None,
         search: Optional[str] = None,
         max_prompts: Optional[int] = None,
     ) -> None:
@@ -68,6 +84,8 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             api_key: PromptIntel API key. Falls back to PROMPTINTEL_API_KEY env var if not provided.
             severity: Filter prompts by severity level. Defaults to None (all severities).
             categories: Filter prompts by threat categories. Defaults to None (all categories).
+                When multiple categories are specified, separate API requests are made for each
+                category and results are merged with deduplication.
             search: Search term to filter prompts by title and content. Defaults to None.
             max_prompts: Maximum number of prompts to fetch. Defaults to None (all available).
 
@@ -76,17 +94,24 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         """
         self._api_key = api_key
 
-        if severity and severity not in self.VALID_SEVERITIES:
-            raise ValueError(f"Invalid severity: {severity}. Valid values: {self.VALID_SEVERITIES}")
-
-        if categories:
-            invalid = [c for c in categories if c not in self.VALID_CATEGORIES]
-            if invalid:
-                raise ValueError(f"Invalid categories: {invalid}. Valid values: {self.VALID_CATEGORIES}")
-            if len(categories) > 1:
+        if severity is not None:
+            valid_severities = {s.value for s in PromptIntelSeverity}
+            sev_value = severity.value if isinstance(severity, PromptIntelSeverity) else severity
+            if sev_value not in valid_severities:
                 raise ValueError(
-                    "PromptIntelDataset supports only a single category filter, "
-                    f"but received multiple categories: {categories}"
+                    f"Invalid severity: {sev_value}. "
+                    f"Valid values: {[s.value for s in PromptIntelSeverity]}"
+                )
+
+        if categories is not None:
+            valid_categories = {c.value for c in PromptIntelCategory}
+            invalid_categories = {
+                cat.value if isinstance(cat, PromptIntelCategory) else cat for cat in categories
+            } - valid_categories
+            if invalid_categories:
+                raise ValueError(
+                    f"Invalid categories: {', '.join(str(c) for c in invalid_categories)}. "
+                    f"Valid values: {[c.value for c in PromptIntelCategory]}"
                 )
 
         self._severity = severity
@@ -100,21 +125,12 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         """Return the dataset name."""
         return "promptintel"
 
-    def _build_request_headers(self) -> Dict[str, str]:
-        """
-        Build HTTP headers for the PromptIntel API.
-
-        Returns:
-            Dict[str, str]: HTTP headers including authorization.
-        """
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-
     def _fetch_all_prompts(self) -> List[Dict[str, Any]]:
         """
         Fetch all prompts from the PromptIntel API, handling pagination.
+
+        When multiple categories are specified, separate API requests are made for each
+        category and results are merged with deduplication by prompt ID.
 
         Returns:
             List[Dict[str, Any]]: All fetched prompt records.
@@ -133,47 +149,65 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+        # Build list of category values to fetch; [None] means fetch all categories
+        categories_to_fetch: List[Optional[str]] = (
+            [c.value for c in self._categories] if self._categories else [None]
+        )
+
         all_prompts: List[Dict[str, Any]] = []
-        page = 1
+        seen_ids: set[str] = set()
         limit = self.MAX_PAGE_LIMIT
 
-        while True:
-            params: Dict[str, Any] = {"page": page, "limit": limit}
-            if self._severity:
-                params["severity"] = self._severity
-            if self._categories:
-                params["category"] = self._categories[0]
-            if self._search:
-                params["search"] = self._search
+        for category in categories_to_fetch:
+            page = 1
 
-            response = requests.get(
-                f"{self.API_BASE_URL}/prompts",
-                headers=headers,
-                params=params,
-                timeout=30,
-            )
+            while True:
+                params: Dict[str, Any] = {"page": page, "limit": limit}
+                if self._severity:
+                    params["severity"] = self._severity.value
+                if category:
+                    params["category"] = category
+                if self._search:
+                    params["search"] = self._search
 
-            if response.status_code != 200:
-                raise ConnectionError(
-                    f"PromptIntel API request failed with status {response.status_code}: {response.text}"
+                response = requests.get(
+                    f"{self.API_BASE_URL}/prompts",
+                    headers=headers,
+                    params=params,
+                    timeout=30,
                 )
 
-            body = response.json()
-            data = body.get("data", [])
-            pagination = body.get("pagination", {})
+                if response.status_code != 200:
+                    raise ConnectionError(
+                        f"PromptIntel API request failed with status {response.status_code}: "
+                        f"{response.text}"
+                    )
 
-            all_prompts.extend(data)
+                body = response.json()
+                data = body.get("data", [])
+                pagination = body.get("pagination", {})
 
-            # Check if we've reached the max_prompts limit
+                for record in data:
+                    record_id = record.get("id")
+                    if record_id not in seen_ids:
+                        seen_ids.add(record_id)
+                        all_prompts.append(record)
+
+                # Check if we've reached the max_prompts limit
+                if self._max_prompts and len(all_prompts) >= self._max_prompts:
+                    all_prompts = all_prompts[: self._max_prompts]
+                    break
+
+                # Check if there are more pages
+                total_pages = pagination.get("pages", 1)
+                if page >= total_pages:
+                    break
+                page += 1
+
+            # Also break the outer loop if max_prompts reached
             if self._max_prompts and len(all_prompts) >= self._max_prompts:
-                all_prompts = all_prompts[: self._max_prompts]
                 break
-
-            # Check if there are more pages
-            total_pages = pagination.get("pages", 1)
-            if page >= total_pages:
-                break
-            page += 1
 
         return all_prompts
 
@@ -244,7 +278,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
 
         return metadata
 
-    def _convert_record_to_seeds(self, record: Dict[str, Any]) -> List[SeedPrompt]:
+    def _convert_record_to_seed_prompt(self, record: Dict[str, Any]) -> Optional[SeedPrompt]:
         """
         Convert a single PromptIntel record into a SeedPrompt.
 
@@ -252,15 +286,15 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             record: A single prompt record from the API.
 
         Returns:
-            List containing a SeedPrompt, or an empty list if the record is skipped.
+            A SeedPrompt, or None if the record is skipped.
         """
         prompt_value = record.get("prompt", "")
         if not prompt_value:
-            return []
+            return None
 
         title = record.get("title", "")
         if not title:
-            return []
+            return None
 
         record_id = record.get("id", "")
 
@@ -277,7 +311,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         # Escape Jinja2 template syntax in the prompt text
         escaped_prompt = f"{{% raw %}}{prompt_value}{{% endraw %}}"
 
-        seed_prompt = SeedPrompt(
+        return SeedPrompt(
             value=escaped_prompt,
             data_type="text",
             name=title,
@@ -290,8 +324,6 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             metadata=metadata,
         )
 
-        return [seed_prompt]
-
     async def fetch_dataset(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch prompts from the PromptIntel API and return as a SeedDataset.
@@ -303,7 +335,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
                 reserved for future caching support.)
 
         Returns:
-            SeedDataset: A SeedDataset containing all fetched prompts and objectives.
+            SeedDataset: A SeedDataset containing all fetched prompts.
         """
         logger.info("Fetching prompts from PromptIntel API")
 
@@ -311,8 +343,9 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
 
         all_seeds = []
         for record in records:
-            seeds = self._convert_record_to_seeds(record)
-            all_seeds.extend(seeds)
+            seed = self._convert_record_to_seed_prompt(record)
+            if seed:
+                all_seeds.append(seed)
 
         logger.info(f"Successfully loaded {len(all_seeds)} prompts from PromptIntel")
 

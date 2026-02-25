@@ -56,6 +56,8 @@ from pyrit.datasets.seed_datasets.remote.pku_safe_rlhf_dataset import (
     _PKUSafeRLHFDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.promptintel_dataset import (
+    PromptIntelCategory,
+    PromptIntelSeverity,
     _PromptIntelDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.red_team_social_bias_dataset import (
@@ -99,6 +101,8 @@ __all__ = [
     "_MedSafetyBenchDataset",
     "_MLCommonsAILuminateDataset",
     "_PKUSafeRLHFDataset",
+    "PromptIntelCategory",
+    "PromptIntelSeverity",
     "_PromptIntelDataset",
     "_RedTeamSocialBiasDataset",
     "_SorryBenchDataset",

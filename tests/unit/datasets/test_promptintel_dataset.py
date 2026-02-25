@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyrit.datasets.seed_datasets.remote.promptintel_dataset import _PromptIntelDataset
+from pyrit.datasets.seed_datasets.remote.promptintel_dataset import (
+    PromptIntelCategory,
+    PromptIntelSeverity,
+    _PromptIntelDataset,
+)
 from pyrit.models import SeedDataset, SeedPrompt
 
 
@@ -107,9 +111,12 @@ class TestPromptIntelDatasetInit:
         with pytest.raises(ValueError, match="Invalid categories"):
             _PromptIntelDataset(api_key=api_key, categories=["invalid_cat"])
 
-    def test_init_multiple_categories_raises(self, api_key):
-        with pytest.raises(ValueError, match="single category filter"):
-            _PromptIntelDataset(api_key=api_key, categories=["manipulation", "abuse"])
+    def test_init_multiple_categories_accepted(self, api_key):
+        loader = _PromptIntelDataset(
+            api_key=api_key,
+            categories=[PromptIntelCategory.MANIPULATION, PromptIntelCategory.ABUSE],
+        )
+        assert loader._categories == [PromptIntelCategory.MANIPULATION, PromptIntelCategory.ABUSE]
 
     def test_dataset_name(self, api_key):
         loader = _PromptIntelDataset(api_key=api_key)
@@ -331,7 +338,7 @@ class TestPromptIntelDatasetFilters:
 
     @pytest.mark.asyncio
     async def test_severity_filter_passed_to_api(self, api_key, mock_promptintel_response):
-        loader = _PromptIntelDataset(api_key=api_key, severity="critical")
+        loader = _PromptIntelDataset(api_key=api_key, severity=PromptIntelSeverity.CRITICAL)
         mock_resp = _make_mock_response(json_data=mock_promptintel_response)
 
         with patch("requests.get", return_value=mock_resp) as mock_get:
@@ -342,7 +349,7 @@ class TestPromptIntelDatasetFilters:
 
     @pytest.mark.asyncio
     async def test_category_filter_passed_to_api(self, api_key, mock_promptintel_response):
-        loader = _PromptIntelDataset(api_key=api_key, categories=["manipulation"])
+        loader = _PromptIntelDataset(api_key=api_key, categories=[PromptIntelCategory.MANIPULATION])
         mock_resp = _make_mock_response(json_data=mock_promptintel_response)
 
         with patch("requests.get", return_value=mock_resp) as mock_get:
@@ -350,6 +357,84 @@ class TestPromptIntelDatasetFilters:
 
         call_kwargs = mock_get.call_args
         assert call_kwargs.kwargs["params"]["category"] == "manipulation"
+
+    @pytest.mark.asyncio
+    async def test_multiple_categories_make_separate_api_calls(self, api_key):
+        manipulation_response = {
+            "data": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "title": "Manipulation Prompt",
+                    "prompt": "Manipulation text",
+                    "severity": "high",
+                    "categories": ["manipulation"],
+                    "threats": ["Jailbreak"],
+                }
+            ],
+            "pagination": {"page": 1, "limit": 100, "total": 1, "pages": 1},
+        }
+        abuse_response = {
+            "data": [
+                {
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "title": "Abuse Prompt",
+                    "prompt": "Abuse text",
+                    "severity": "medium",
+                    "categories": ["abuse"],
+                    "threats": ["Exfiltration"],
+                }
+            ],
+            "pagination": {"page": 1, "limit": 100, "total": 1, "pages": 1},
+        }
+
+        loader = _PromptIntelDataset(
+            api_key=api_key,
+            categories=[PromptIntelCategory.MANIPULATION, PromptIntelCategory.ABUSE],
+        )
+        responses = [
+            _make_mock_response(json_data=manipulation_response),
+            _make_mock_response(json_data=abuse_response),
+        ]
+
+        with patch("requests.get", side_effect=responses) as mock_get:
+            dataset = await loader.fetch_dataset()
+
+        # Two separate API calls should be made
+        assert mock_get.call_count == 2
+        first_call = mock_get.call_args_list[0]
+        second_call = mock_get.call_args_list[1]
+        assert first_call.kwargs["params"]["category"] == "manipulation"
+        assert second_call.kwargs["params"]["category"] == "abuse"
+        # Both prompts should be in the result
+        assert len(dataset.seeds) == 2
+
+    @pytest.mark.asyncio
+    async def test_multiple_categories_deduplicates_results(self, api_key):
+        # Same prompt appears in both categories
+        shared_record = {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "title": "Shared Prompt",
+            "prompt": "Shared text",
+            "severity": "high",
+            "categories": ["manipulation", "abuse"],
+            "threats": ["Mixed"],
+        }
+        response_data = {
+            "data": [shared_record],
+            "pagination": {"page": 1, "limit": 100, "total": 1, "pages": 1},
+        }
+
+        loader = _PromptIntelDataset(
+            api_key=api_key,
+            categories=[PromptIntelCategory.MANIPULATION, PromptIntelCategory.ABUSE],
+        )
+        mock_resp = _make_mock_response(json_data=response_data)
+
+        with patch("requests.get", return_value=mock_resp):
+            dataset = await loader.fetch_dataset()
+
+        # Should deduplicate by ID — only 1 seed even though 2 API calls
+        assert len(dataset.seeds) == 1
 
     @pytest.mark.asyncio
     async def test_search_filter_passed_to_api(self, api_key, mock_promptintel_response):
