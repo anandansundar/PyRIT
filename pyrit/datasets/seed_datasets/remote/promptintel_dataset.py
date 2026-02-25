@@ -211,7 +211,9 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
 
         categories = record.get("categories", [])
         if categories:
-            display_names = [_CATEGORY_DISPLAY_NAMES.get(c, c) for c in categories]
+            display_names = [
+                _CATEGORY_DISPLAY_NAMES.get(c, c) for c in categories if isinstance(c, str)
+            ]
             metadata["categories"] = ", ".join(display_names)
 
         tags = record.get("tags", [])
