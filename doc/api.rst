@@ -370,6 +370,7 @@ API Reference
     ScoreType
     Seed
     SeedAttackGroup
+    SeedAttackTechniqueGroup
     SeedDataset
     SeedGroup
     SeedObjective
