@@ -3,8 +3,7 @@
 
 import logging
 import os
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 import requests
@@ -12,7 +11,7 @@ import requests
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import SeedDataset, SeedObjective, SeedPrompt
+from pyrit.models import SeedDataset, SeedPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +35,11 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
     Reference: https://promptintel.novahunting.ai
     API Docs: https://promptintel.novahunting.ai/api
 
-    Each prompt is mapped to a SeedGroup containing:
-    - A SeedPrompt with the attack text
-    - A SeedObjective with the attack title (the goal of the attack)
+    Each prompt is mapped to a SeedPrompt with the attack text and metadata.
+    The attack title is stored in the SeedPrompt's `name` field.
 
-    Both share the same prompt_group_id so they are grouped together.
+    Note: PromptIntel does not provide separate objective data, so no SeedObjective
+    objects are created.
 
     Warning: This dataset contains adversarial prompts designed to exploit LLMs.
     Use responsibly and consult your legal department before using for testing.
@@ -73,15 +72,9 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             max_prompts: Maximum number of prompts to fetch. Defaults to None (all available).
 
         Raises:
-            ValueError: If no API key is provided and PROMPTINTEL_API_KEY is not set.
             ValueError: If an invalid severity or category is provided.
         """
-        self._api_key = api_key or os.environ.get("PROMPTINTEL_API_KEY")
-        if not self._api_key:
-            raise ValueError(
-                "PromptIntel API key is required. Provide it via the 'api_key' parameter "
-                "or set the PROMPTINTEL_API_KEY environment variable."
-            )
+        self._api_key = api_key
 
         if severity and severity not in self.VALID_SEVERITIES:
             raise ValueError(f"Invalid severity: {severity}. Valid values: {self.VALID_SEVERITIES}")
@@ -90,6 +83,11 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             invalid = [c for c in categories if c not in self.VALID_CATEGORIES]
             if invalid:
                 raise ValueError(f"Invalid categories: {invalid}. Valid values: {self.VALID_CATEGORIES}")
+            if len(categories) > 1:
+                raise ValueError(
+                    "PromptIntelDataset supports only a single category filter, "
+                    f"but received multiple categories: {categories}"
+                )
 
         self._severity = severity
         self._categories = categories
@@ -103,7 +101,12 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         return "promptintel"
 
     def _build_request_headers(self) -> Dict[str, str]:
-        """Build HTTP headers for the PromptIntel API."""
+        """
+        Build HTTP headers for the PromptIntel API.
+
+        Returns:
+            Dict[str, str]: HTTP headers including authorization.
+        """
         return {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -117,9 +120,19 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             List[Dict[str, Any]]: All fetched prompt records.
 
         Raises:
+            ValueError: If no API key is provided and PROMPTINTEL_API_KEY is not set.
             ConnectionError: If the API request fails.
         """
-        headers = self._build_request_headers()
+        api_key = self._api_key or os.environ.get("PROMPTINTEL_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "PromptIntel API key is required. Provide it via the 'api_key' parameter "
+                "or set the PROMPTINTEL_API_KEY environment variable."
+            )
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
         all_prompts: List[Dict[str, Any]] = []
         page = 1
         limit = self.MAX_PAGE_LIMIT
@@ -181,7 +194,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         except (ValueError, AttributeError):
             return None
 
-    def _build_metadata(self, record: Dict[str, Any]) -> Dict[str, str]:
+    def _build_metadata(self, record: Dict[str, Any]) -> Dict[str, str | int]:
         """
         Build the metadata dict from a PromptIntel record.
 
@@ -189,9 +202,9 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             record: A single prompt record from the API.
 
         Returns:
-            Dict[str, str]: Metadata dictionary with string values.
+            Dict[str, str | int]: Metadata dictionary with string or integer values.
         """
-        metadata: Dict[str, str] = {}
+        metadata: Dict[str, str | int] = {}
 
         if record.get("severity"):
             metadata["severity"] = record["severity"]
@@ -229,15 +242,15 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
 
         return metadata
 
-    def _convert_record_to_seeds(self, record: Dict[str, Any]) -> List[Any]:
+    def _convert_record_to_seeds(self, record: Dict[str, Any]) -> List[SeedPrompt]:
         """
-        Convert a single PromptIntel record into a SeedPrompt and SeedObjective pair.
+        Convert a single PromptIntel record into a SeedPrompt.
 
         Args:
             record: A single prompt record from the API.
 
         Returns:
-            List containing a SeedPrompt and a SeedObjective sharing a prompt_group_id.
+            List containing a SeedPrompt, or an empty list if the record is skipped.
         """
         prompt_value = record.get("prompt", "")
         if not prompt_value:
@@ -247,12 +260,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         if not title:
             return []
 
-        # Use the PromptIntel UUID as the prompt_group_id to link prompt + objective
         record_id = record.get("id", "")
-        try:
-            group_id = uuid.UUID(record_id)
-        except (ValueError, AttributeError):
-            group_id = uuid.uuid4()
 
         # Build common fields
         threats = record.get("threats", [])
@@ -278,27 +286,15 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             source=source_url,
             date_added=date_added,
             metadata=metadata,
-            prompt_group_id=group_id,
         )
 
-        seed_objective = SeedObjective(
-            value=title,
-            dataset_name=self.dataset_name,
-            harm_categories=harm_categories,
-            authors=authors,
-            source=source_url,
-            date_added=date_added,
-            prompt_group_id=group_id,
-        )
-
-        return [seed_prompt, seed_objective]
+        return [seed_prompt]
 
     async def fetch_dataset(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch prompts from the PromptIntel API and return as a SeedDataset.
 
-        Each prompt is converted into a SeedGroup containing a SeedPrompt (the attack text)
-        and a SeedObjective (the attack title/goal), linked by a shared prompt_group_id.
+        Each prompt is converted into a SeedPrompt containing the attack text and metadata.
 
         Args:
             cache: Whether to cache the fetched dataset. Defaults to True. (Currently unused;
@@ -316,12 +312,6 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             seeds = self._convert_record_to_seeds(record)
             all_seeds.extend(seeds)
 
-        prompt_count = sum(1 for s in all_seeds if isinstance(s, SeedPrompt) and not isinstance(s, SeedObjective))
-        objective_count = sum(1 for s in all_seeds if isinstance(s, SeedObjective))
-
-        logger.info(
-            f"Successfully loaded {prompt_count} prompts and {objective_count} objectives "
-            f"from PromptIntel ({prompt_count} seed groups)"
-        )
+        logger.info(f"Successfully loaded {len(all_seeds)} prompts from PromptIntel")
 
         return SeedDataset(seeds=all_seeds, dataset_name=self.dataset_name)
