@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import requests
 
@@ -17,7 +17,7 @@ from pyrit.models import SeedDataset, SeedPrompt
 logger = logging.getLogger(__name__)
 
 # Maps PromptIntel short category IDs to their full taxonomy names
-_CATEGORY_DISPLAY_NAMES: Dict[str, str] = {
+_CATEGORY_DISPLAY_NAMES: dict[str, str] = {
     "manipulation": "Prompt Manipulation",
     "abuse": "Abusing Legitimate Functions",
     "patterns": "Suspicious Prompt Patterns",
@@ -73,7 +73,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         *,
         api_key: Optional[str] = None,
         severity: Optional[PromptIntelSeverity] = None,
-        categories: Optional[List[PromptIntelCategory]] = None,
+        categories: Optional[list[PromptIntelCategory]] = None,
         search: Optional[str] = None,
         max_prompts: Optional[int] = None,
     ) -> None:
@@ -99,8 +99,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             sev_value = severity.value if isinstance(severity, PromptIntelSeverity) else severity
             if sev_value not in valid_severities:
                 raise ValueError(
-                    f"Invalid severity: {sev_value}. "
-                    f"Valid values: {[s.value for s in PromptIntelSeverity]}"
+                    f"Invalid severity: {sev_value}. Valid values: {[s.value for s in PromptIntelSeverity]}"
                 )
 
         if categories is not None:
@@ -125,7 +124,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         """Return the dataset name."""
         return "promptintel"
 
-    def _fetch_all_prompts(self) -> List[Dict[str, Any]]:
+    def _fetch_all_prompts(self) -> list[dict[str, Any]]:
         """
         Fetch all prompts from the PromptIntel API, handling pagination.
 
@@ -151,11 +150,9 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         }
 
         # Build list of category values to fetch; [None] means fetch all categories
-        categories_to_fetch: List[Optional[str]] = (
-            [c.value for c in self._categories] if self._categories else [None]
-        )
+        categories_to_fetch: list[Optional[str]] = [c.value for c in self._categories] if self._categories else [None]
 
-        all_prompts: List[Dict[str, Any]] = []
+        all_prompts: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         limit = self.MAX_PAGE_LIMIT
 
@@ -163,7 +160,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
             page = 1
 
             while True:
-                params: Dict[str, Any] = {"page": page, "limit": limit}
+                params: dict[str, Any] = {"page": page, "limit": limit}
                 if self._severity:
                     params["severity"] = self._severity.value
                 if category:
@@ -180,8 +177,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
 
                 if response.status_code != 200:
                     raise ConnectionError(
-                        f"PromptIntel API request failed with status {response.status_code}: "
-                        f"{response.text}"
+                        f"PromptIntel API request failed with status {response.status_code}: {response.text}"
                     )
 
                 body = response.json()
@@ -228,7 +224,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         except (ValueError, AttributeError):
             return None
 
-    def _build_metadata(self, record: Dict[str, Any]) -> Dict[str, str | int]:
+    def _build_metadata(self, record: dict[str, Any]) -> dict[str, str | int]:
         """
         Build the metadata dict from a PromptIntel record.
 
@@ -238,16 +234,14 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
         Returns:
             Dict[str, str | int]: Metadata dictionary with string or integer values.
         """
-        metadata: Dict[str, str | int] = {}
+        metadata: dict[str, str | int] = {}
 
         if record.get("severity"):
             metadata["severity"] = record["severity"]
 
         categories = record.get("categories", [])
         if categories:
-            display_names = [
-                _CATEGORY_DISPLAY_NAMES.get(c, c) for c in categories if isinstance(c, str)
-            ]
+            display_names = [_CATEGORY_DISPLAY_NAMES.get(c, c) for c in categories if isinstance(c, str)]
             metadata["categories"] = ", ".join(display_names)
 
         tags = record.get("tags", [])
@@ -278,7 +272,7 @@ class _PromptIntelDataset(_RemoteDatasetLoader):
 
         return metadata
 
-    def _convert_record_to_seed_prompt(self, record: Dict[str, Any]) -> Optional[SeedPrompt]:
+    def _convert_record_to_seed_prompt(self, record: dict[str, Any]) -> Optional[SeedPrompt]:
         """
         Convert a single PromptIntel record into a SeedPrompt.
 
